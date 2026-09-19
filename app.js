@@ -357,123 +357,96 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.removeChild(textarea);
   }
 
-  // 모바일 음성 낭독 (TTS) 최적화 및 상태 관리
-  let globalUtterance = null;
-  let audioFallback = null;
+  // 모바일 음성 낭독 (TTS) 엔진 최적화
+  let activeUtterance = null;
 
-  // 모바일 음성 목록 미리 로드
-  if ('speechSynthesis' in window) {
-    window.speechSynthesis.getVoices();
-    window.speechSynthesis.onvoiceschanged = () => {
-      window.speechSynthesis.getVoices();
-    };
+  // iOS 및 모바일 오디오 하드웨어 세션 활성화 (무음 모드 및 하드웨어 절전 해제)
+  function activateAudioSession() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const buffer = ctx.createBuffer(1, 1, 22050);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+        if (ctx.state === 'suspended') {
+          ctx.resume();
+        }
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.resume();
+      }
+    } catch (e) {}
   }
 
-  // 모바일 오디오 언락 (첫 터치 제스처 시 오디오 컨텍스트 깨우기)
-  function unlockMobileAudio() {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.resume();
-    }
-  }
-  document.addEventListener('touchstart', unlockMobileAudio, { once: true, passive: true });
-  document.addEventListener('click', unlockMobileAudio, { once: true, passive: true });
+  // 화면 첫 터치 시 오디오 세션 예열
+  document.addEventListener('touchstart', activateAudioSession, { once: true, passive: true });
+  document.addEventListener('click', activateAudioSession, { once: true, passive: true });
 
   // 음성 낭독 (TTS)
   function speakQuote(quote) {
-    const text = `${quote.quote_ko}. ${quote.author_ko}`;
-
-    // 1. Web Speech API 시도
-    if ('speechSynthesis' in window) {
-      try {
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.resume();
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        globalUtterance = utterance; // 모바일 가비지 컬렉터에 의한 음성 중단 방지
-
-        utterance.lang = 'ko-KR';
-        utterance.rate = 0.92;
-        utterance.pitch = 1.0;
-
-        // 한국어 음성 탐색 (기기별 최적 한국어 보이스 선택)
-        const voices = window.speechSynthesis.getVoices();
-        if (voices && voices.length > 0) {
-          const koVoice = voices.find(v => v.lang === 'ko-KR' || v.lang === 'ko_KR') ||
-                          voices.find(v => v.lang && v.lang.startsWith('ko')) ||
-                          voices.find(v => (v.name && (v.name.includes('Korean') || v.name.includes('한국어'))));
-          if (koVoice) {
-            utterance.voice = koVoice;
-          }
-        }
-
-        let hasStarted = false;
-        utterance.onstart = () => {
-          hasStarted = true;
-          showToast('명언을 낭독합니다...');
-        };
-
-        utterance.onend = () => {
-          globalUtterance = null;
-        };
-
-        utterance.onerror = (e) => {
-          console.warn('SpeechSynthesis error, trying audio fallback:', e);
-          globalUtterance = null;
-          playAudioFallback(text);
-        };
-
-        // 모바일에서 1초 내에 재생이 안 될 경우 자동 오디오 폴백 전환
-        setTimeout(() => {
-          if (!hasStarted && (!window.speechSynthesis.speaking || window.speechSynthesis.paused)) {
-            window.speechSynthesis.resume();
-            // 그래도 안 나오면 폴백 실행
-            setTimeout(() => {
-              if (!hasStarted) {
-                playAudioFallback(text);
-              }
-            }, 600);
-          }
-        }, 800);
-
-        window.speechSynthesis.speak(utterance);
-        return;
-      } catch (err) {
-        console.warn('Web Speech API failed, switching to audio fallback:', err);
-      }
+    if (!('speechSynthesis' in window)) {
+      showToast('이 브라우저는 음성 읽기를 지원하지 않습니다. Chrome이나 Safari로 열어주세요.');
+      return;
     }
 
-    // 2. 모바일 Fallback: HTML5 Audio 스트림
-    playAudioFallback(text);
-  }
-
-  // 모바일 오디오 폴백 함수 (카카오톡, 인스타 인앱브라우저 및 음성 엔진 미지원 모바일 기기 지원)
-  function playAudioFallback(text) {
     try {
-      if (audioFallback) {
-        audioFallback.pause();
-        audioFallback = null;
-      }
-      const shortText = text.length > 90 ? text.substring(0, 90) : text;
-      const encoded = encodeURIComponent(shortText);
-      const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=ko&client=tw-ob&q=${encoded}`;
+      // 터치 이벤트 컨텍스트에서 즉시 오디오 언락
+      activateAudioSession();
 
-      audioFallback = new Audio(url);
-      audioFallback.onplay = () => {
-        showToast('명언을 낭독합니다...');
-      };
-      audioFallback.onerror = () => {
-        showToast('이 기기에서는 음성 읽기를 지원하지 않습니다.');
+      // 이전 음성 정리 및 오디오 컨텍스트 재개
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel();
+      }
+      window.speechSynthesis.resume();
+
+      const text = `${quote.quote_ko}. ${quote.author_ko}`;
+      const utterance = new SpeechSynthesisUtterance(text);
+
+      // 모바일 가비지 컬렉터(GC)에 의한 음성 중단 버그 방지
+      window._activeUtterance = utterance;
+      activeUtterance = utterance;
+
+      utterance.lang = 'ko-KR';
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+
+      // 한국어 음성 탐색 (기기에 설치된 한국어 보이스 선택)
+      const voices = window.speechSynthesis.getVoices();
+      if (voices && voices.length > 0) {
+        const koVoice = voices.find(v => v.lang === 'ko-KR' || v.lang === 'ko_KR') ||
+                        voices.find(v => v.lang && v.lang.startsWith('ko'));
+        if (koVoice) {
+          utterance.voice = koVoice;
+        }
+      }
+
+      utterance.onstart = () => {
+        showToast('🔊 명언을 낭독합니다. (소리가 안 나면 볼륨 및 무음 스위치를 확인해 주세요)');
       };
 
-      const playPromise = audioFallback.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(err => {
-          console.warn('Audio fallback play error:', err);
-          showToast('화면을 터치한 후 다시 시도해 주세요.');
-        });
-      }
-    } catch (e) {
-      showToast('음성 재생에 실패했습니다.');
+      utterance.onend = () => {
+        window._activeUtterance = null;
+        activeUtterance = null;
+      };
+
+      utterance.onerror = (e) => {
+        console.warn('SpeechSynthesis error:', e);
+        window._activeUtterance = null;
+        activeUtterance = null;
+        if (e.error !== 'interrupted' && e.error !== 'canceled') {
+          showToast('음성 낭독 중 문제가 발생했습니다. 다시 눌러보세요.');
+        }
+      };
+
+      // 사용자 터치 즉시 동기 실행 (모바일 브라우저 필수 정책)
+      window.speechSynthesis.speak(utterance);
+
+    } catch (err) {
+      console.error('TTS error:', err);
+      showToast('음성을 재생할 수 없습니다.');
     }
   }
 
